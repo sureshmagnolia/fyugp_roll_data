@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nominal Roll Extractor</title>
+    
+    <!-- Load Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Load PyScript -->
+    <link rel="stylesheet" href="https://pyscript.net/releases/2024.1.1/core.css">
+    <script type="module" src="https://pyscript.net/releases/2024.1.1/core.js"></script>
+
+    <style>
+        /* Simple spinning animation */
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        .loader-spin {
+            animation: spin 1s linear infinite;
+        }
+        /* Hide element */
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans flex items-center justify-center min-h-screen">
+
+    <!-- Define Python Environment -->
+    <py-config>
+        <!-- Pinning pdfplumber to a pure-python version to avoid pypdfium2 error -->
+        packages = ["pandas", "pdfplumber==0.7.1"]
+    </py-config>
+
+    <div class="container max-w-2xl mx-auto p-4">
+        <div class="bg-white p-8 rounded-lg shadow-xl w-full">
+            
+            <header class="mb-6">
+                <h1 class="text-3xl font-bold text-gray-800">Nominal Roll Extractor</h1>
+                <p class="text-gray-600 mt-2">
+                    Upload your "NR_Third Semester..." PDF file, and this app will extract the schedule into a CSV format.
+                </p>
+            </header>
+
+            <!-- How to Use Instructions -->
+            <div class="bg-indigo-50 border border-indigo-200 p-4 rounded-md mb-6">
+                <h4 class="font-semibold text-gray-800">How to Use:</h4>
+                <ol class="list-decimal list-inside text-sm text-gray-700 mt-2 space-y-1">
+                    <li>Select your PDF Nominal Roll file (or a combined PDF of multiple rolls).</li>
+                    <li>Click 'Run Extraction'.</li>
+                    <li>The button will show a spinner. Wait for processing.</li>
+                    <li>A green download button will appear with your file (e.g., `Test1.csv`).</li>
+                </ol>
+            </div>
+            <!-- END HOW TO USE SECTION -->
+
+            <!-- Disclaimer -->
+            <div class="bg-yellow-50 border border-yellow-300 p-4 rounded-md mb-6">
+                <h4 class="font-semibold text-yellow-800">Disclaimer:</h4>
+                <p class="text-sm text-yellow-700 mt-2">
+                    This tool uses automated logic to extract data. Due to variations in PDF formatting, the extracted data may contain errors. Please double-check the results.
+                </p>
+            </div>
+            <!-- END Disclaimer SECTION -->
+
+            <!-- HTML Interface -->
+            <div class="space-y-4">
+                <div>
+                    <label for="pdf-file" class="block text-sm font-medium text-gray-700">1. Select PDF File:</label>
+                    <input type="file" id="pdf-file" accept=".pdf"
+                           class="mt-1 block w-full text-sm text-gray-500
+                                  file:mr-4 file:py-2 file:px-4
+                                  file:rounded-md file:border-0
+                                  file:text-sm file:font-semibold
+                                  file:bg-indigo-50 file:text-indigo-700
+                                  hover:file:bg-indigo-100"/>
+                </div>
+                
+                <button id="run-button" 
+                        py-click="run_extraction"
+                        class="w-full inline-flex justify-center items-center rounded-md border border-transparent bg-indigo-600 py-3 px-4 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-50 disabled:bg-indigo-400">
+                    <!-- Loading Spinner (hidden by default) -->
+                    <svg id="loader" class="loader-spin -ml-1 mr-3 h-5 w-5 text-white hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <!-- Button Text -->
+                    <span id="button-text">2. Run Extraction</span>
+                </button>
+            </div>
+
+            <!-- Output & Download Area -->
+            <div class="mt-6">
+                <h3 class="text-lg font-medium text-gray-900">Processing Log:</h3>
+                <div id="status" class="w-full h-48 p-3 mt-2 bg-gray-900 text-gray-200 text-sm font-mono rounded-md overflow-y-auto">
+                    Waiting for file...
+                </div>
+            </div>
+
+            <div id="download-area" class="mt-6">
+                <!-- The download link will appear here -->
+            </div>
+
+        </div>
+    </div>
+
+    <!-- The Python Script -->
+    <py-script>
+        import pandas as pd
+        import pdfplumber
+        import re
+        import io
+        from js import document, console, URL, Blob
+        import asyncio
+
+        # Get references to our HTML elements
+        status_div = document.getElementById("status")
+        download_area = document.getElementById("download-area")
+        run_button = document.getElementById("run-button")
+        loader_icon = document.getElementById("loader")
+        button_text = document.getElementById("button-text")
+
+        def log_message(message):
+            """Helper function to print messages to the HTML log."""
+            console.log(message)
+            # Use single-quotes for the f-string, double-quotes for HTML
+            status_div.innerHTML += f'<p class="mb-1">&gt; {message}</p>'
+            status_div.scrollTop = status_div.scrollHeight
+        
+        def show_loader(is_loading):
+            """Shows or hides the loader and updates button text."""
+            if is_loading:
+                run_button.disabled = True
+                loader_icon.classList.remove("hidden")
+                button_text.textContent = "Processing..."
+            else:
+                run_button.disabled = False
+                loader_icon.classList.add("hidden")
+                button_text.textContent = "2. Run Extraction"
+
+        async def run_extraction(event=None):
+            """
+            This function is called when the "Run Extraction" button is clicked.
+            """
+            try:
+                # Show loader and disable button
+                show_loader(True)
+                # Give the browser a moment to show the loader
+                await asyncio.sleep(0) 
+                
+                download_area.innerHTML = ""
+                status_div.innerHTML = ""
+                
+                log_message("Starting extraction...")
+
+                # 1. Get the file from the HTML input
+                file_input = document.getElementById("pdf-file")
+                file_list = file_input.files
+                
+                if file_list.length == 0:
+                    log_message("Error: Please select a PDF file first.")
+                    show_loader(False)
+                    return
+
+                file = file_list.item(0)
+                # Get the filename from the file object
+                file_name = file.name
+                log_message(f"Loading file: {file_name}...")
+
+                # 2. Read the file into a Python-readable bytes object
+                file_bytes = await file.arrayBuffer()
+                pdf_file_obj = io.BytesIO(file_bytes.to_py())
+
+                log_message("File loaded. Processing with pdfplumber...")
+                
+                all_exam_rows = []
+                
+                # Regex for Register Number
+                # [A-Z0-9]{5,} -> 5 or more letters/digits (e.g., VPAYSPY)
+                # \d{3} -> 3 digits (e.g., 001)
+                reg_num_regex = re.compile(r'([A-Z0-9]{5,}\d{3})')
+                
+                # --- Persistent Header Info ---
+                # These will carry over from page to page unless new headers are found
+                course_name = "Unknown"
+                date_val = "Unknown"
+                time_val = "Unknown"
+                # ---
+
+                # 3. --- Start of PDF processing logic ---
+                with pdfplumber.open(pdf_file_obj) as pdf:
+                    total_pages = len(pdf.pages)
+                    log_message(f"Total pages found: {total_pages}")
+
+                    for i, page in enumerate(pdf.pages):
+                        log_message(f"Processing page {i + 1}/{total_pages}...")
+                        # --- FIX: Give browser time to update the log ---
+                        await asyncio.sleep(0)
+                        
+                        # --- 3a. Update Headers ---
+                        # On *every* page, check for new header info.
+                        # This handles multi-file PDFs.
+                        page_text = page.extract_text(y_tolerance=3, x_tolerance=3)
+                        
+                        # Look for the actual course string pattern (e.g., "CODE...[...syllabus]")
+                        # This is far more robust than parsing the layout.
+                        course_match = re.search(r'([A-Z0-9]{3,}\d{3,}.*?\[.*?syllabus\])', page_text, re.DOTALL)
+                        if course_match:
+                            new_course_name = course_match.group(1).strip().replace('\n', ' ')
+                            
+                            # Clean up a specific parsing artifact where "Course"
+                            # is incorrectly inserted before the syllabus.
+                            new_course_name = new_course_name.replace(' Course [', ' [')
+                            
+                            if new_course_name != course_name:
+                                course_name = new_course_name
+                                log_message(f"Found new Course: {course_name}")
+
+                        # Date/Time is more structured, so layout parsing is fine.
+                        date_match = re.search(r'Date of Examination.*?(\d{2}\.\d{2}\.\d{4})\s*(\d{2}:\d{2}\s*PM)', page_text, re.DOTALL)
+                        if date_match:
+                            new_date_val = date_match.group(1).strip()
+                            new_time_val = date_match.group(2).strip()
+                            
+                            if new_date_val != date_val or new_time_val != time_val:
+                                date_val = new_date_val
+                                time_val = new_time_val
+                                log_message(f"Found new Date: {date_val}, Time: {time_val}")
+                        
+                        # --- 3b. Extract Table Data ---
+                        tables = page.extract_tables()
+                        
+                        processed_rows_on_page = 0
+                        
+                        for table in tables:
+                            for row in table:
+                                try:
+                                    if not row or not row[0]:
+                                        continue
+                                    
+                                    # A valid student row starts with a number (e.g., "1", "2"...)
+                                    if not row[0].strip().isdigit():
+                                        continue
+                                        
+                                    reg_num = "Unknown"
+                                    name = "Unknown"
+                                    
+                                    # Find the register number and name in the row
+                                    for idx, cell in enumerate(row):
+                                        if not cell:
+                                            continue
+                                        
+                                        cell_text = cell.strip().replace('\n', ' ')
+                                        
+                                        # Search for the reg num pattern *inside* the cell
+                                        reg_match = reg_num_regex.search(cell_text)
+                                        
+                                        if reg_match:
+                                            reg_num = reg_match.group(1)
+                                            
+                                            # Try to find name in the *same cell*
+                                            # (e.g., "VPAYSBO023 SHAN MUHAMMED")
+                                            name_fragment = cell_text.replace(reg_num, '').strip()
+                                            if name_fragment and not reg_num_regex.search(name_fragment) and not name_fragment.isdigit():
+                                                name = name_fragment
+                                                break # Found both
+                                            
+                                            # If not in same cell, check the *next* cells
+                                            # (Handles "Unknown" name problem)
+                                            try:
+                                                # Check next cell
+                                                next_cell = row[idx+1]
+                                                if next_cell and next_cell.strip():
+                                                    name = next_cell.strip().replace('\n', ' ')
+                                                    break # Found it
+                                                    
+                                                # Check next-next cell (in case of blank column)
+                                                next_next_cell = row[idx+2]
+                                                if next_next_cell and next_next_cell.strip():
+                                                    name = next_next_cell.strip().replace('\n', ' ')
+                                                    break # Found it
+                                            except IndexError:
+                                                pass # Reached end of row
+                                    
+                                    # Add the row if we found a register number
+                                    if reg_num != "Unknown":
+                                        formatted_row = {
+                                            'Date': date_val.strip(),
+                                            'Time': time_val.strip(),
+                                            'Course': course_name.strip(),
+                                            'Register Number': reg_num.strip(),
+                                            'Name': name.strip()
+                                        }
+                                        all_exam_rows.append(formatted_row)
+                                        processed_rows_on_page += 1
+                                
+                                except Exception as e:
+                                    log_message(f"Warning: Skipping row. Details: {e}")
+
+                        if processed_rows_on_page > 0:
+                           log_message(f"Found {processed_rows_on_page} candidates on page {i + 1}.")
+                           # --- FIX: Give browser time to update the log ---
+                           await asyncio.sleep(0)
+
+                # --- End of PDF processing logic ---
+                
+                if not all_exam_rows:
+                    log_message("Error: No data was extracted. Check if this is a Nominal Roll PDF.")
+                    show_loader(False)
+                    return
+
+                log_message(f"Processed {total_pages} pages. Found {len(all_exam_rows)} total candidates.")
+                
+                # --- FIX: Give browser time to update the log ---
+                await asyncio.sleep(0)
+                log_message("Converting to DataFrame and creating CSV...")
+
+                # 4. Convert to Pandas DataFrame and create CSV string
+                df = pd.DataFrame(all_exam_rows)
+                # Reorder columns to match user's request
+                df = df[['Date', 'Time', 'Course', 'Register Number', 'Name']]
+                csv_data = df.to_csv(index=False, encoding='utf-8')
+
+                # 5. Create a downloadable link for the CSV
+                blob = Blob.new([csv_data], {type: "text/csv;charset=utf-8"})
+                url = URL.createObjectURL(blob)
+                
+                # Use the original filename to create the CSV filename
+                csv_filename = file_name.rsplit('.', 1)[0] + '.csv' if '.' in file_name else 'output.csv'
+
+                download_area.innerHTML = f"""
+                    <a href="{url}" download="{csv_filename}"
+                       class="w-full inline-flex justify-center items-center rounded-md border border-transparent bg-green-600 py-3 px-4 text-sm font-medium text-white shadow-sm hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2">
+                        Download {csv_filename} ({len(all_exam_rows)} rows)
+                    </a>
+                """
+                
+                log_message("Success! Your file is ready for download.")
+
+            except Exception as e:
+                log_message(f"An error occurred: {e}")
+            finally:
+                # Re-enable the button and hide loader
+                show_loader(False)
+    </py-script>
+
+</body>
+</html>
+
