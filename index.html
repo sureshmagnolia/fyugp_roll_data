@@ -41,7 +41,7 @@
             <header class="mb-6">
                 <h1 class="text-3xl font-bold text-gray-800">Nominal Roll Extractor</h1>
                 <p class="text-gray-600 mt-2">
-                    Upload your "NR_Third Semester..." PDF file, and this app will extract the schedule into a CSV format.
+                    Upload your "NR_Third Semester..." PDF file, and this app will extract the schedule into a CSV format, complete with Room Numbers.
                 </p>
             </header>
 
@@ -53,6 +53,7 @@
                     <li>Click 'Run Extraction'.</li>
                     <li>The button will show a spinner. Wait for processing.</li>
                     <li>A green download button will appear with your file (e.g., `Test1.csv`).</li>
+                    <li>The final CSV will include a "Room No" column, correctly sorted by date.</li>
                 </ol>
             </div>
             <!-- END HOW TO USE SECTION -->
@@ -115,6 +116,8 @@
         import io
         from js import document, console, URL, Blob
         import asyncio
+        import math # Added for room number calculation
+        from datetime import datetime # Added for sorting
 
         # Get references to our HTML elements
         status_div = document.getElementById("status")
@@ -140,6 +143,20 @@
                 run_button.disabled = False
                 loader_icon.classList.add("hidden")
                 button_text.textContent = "2. Run Extraction"
+        
+        # --- NEW: Helper function for sorting ---
+        def get_sort_key(row):
+            """Converts DD.MM.YYYY and HH:MM PM to a sortable format."""
+            try:
+                # Convert date
+                date_obj = datetime.strptime(row['Date'], '%d.%m.%Y')
+                # Convert time
+                time_obj = datetime.strptime(row['Time'], '%I:%M %p') # '02:00 PM'
+                return (date_obj, time_obj)
+            except ValueError as e:
+                console.log(f"Sort Error: Could not parse Date '{row['Date']}' or Time '{row['Time']}'. Error: {e}")
+                # Fallback for "Unknown" or malformed dates/times
+                return (datetime.min, datetime.min) 
 
         async def run_extraction(event=None):
             """
@@ -179,12 +196,9 @@
                 all_exam_rows = []
                 
                 # Regex for Register Number
-                # [A-Z0-9]{5,} -> 5 or more letters/digits (e.g., VPAYSPY)
-                # \d{3} -> 3 digits (e.g., 001)
                 reg_num_regex = re.compile(r'([A-Z0-9]{5,}\d{3})')
                 
                 # --- Persistent Header Info ---
-                # These will carry over from page to page unless new headers are found
                 course_name = "Unknown"
                 date_val = "Unknown"
                 time_val = "Unknown"
@@ -197,95 +211,94 @@
 
                     for i, page in enumerate(pdf.pages):
                         log_message(f"Processing page {i + 1}/{total_pages}...")
-                        # --- FIX: Give browser time to update the log ---
                         await asyncio.sleep(0)
                         
-                        # --- 3a. Update Headers ---
-                        # On *every* page, check for new header info.
-                        # This handles multi-file PDFs.
                         page_text = page.extract_text(y_tolerance=3, x_tolerance=3)
                         
-                        # Look for the actual course string pattern (e.g., "CODE...[...syllabus]")
-                        # This is far more robust than parsing the layout.
+                        # Find Course
                         course_match = re.search(r'([A-Z0-9]{3,}\d{3,}.*?\[.*?syllabus\])', page_text, re.DOTALL)
                         if course_match:
                             new_course_name = course_match.group(1).strip().replace('\n', ' ')
-                            
-                            # Clean up a specific parsing artifact where "Course"
-                            # is incorrectly inserted before the syllabus.
                             new_course_name = new_course_name.replace(' Course [', ' [')
-                            
                             if new_course_name != course_name:
                                 course_name = new_course_name
                                 log_message(f"Found new Course: {course_name}")
 
-                        # Date/Time is more structured, so layout parsing is fine.
-                        date_match = re.search(r'Date of Examination.*?(\d{2}\.\d{2}\.\d{4})\s*(\d{2}:\d{2}\s*PM)', page_text, re.DOTALL)
-                        if date_match:
-                            new_date_val = date_match.group(1).strip()
-                            new_time_val = date_match.group(2).strip()
-                            
-                            if new_date_val != date_val or new_time_val != time_val:
+                        # --- *** NEW DATE/TIME LOGIC *** ---
+                        # Find Date and Time together from the same line for reliability
+                        datetime_match = re.search(
+                            r'Date of Examination.*?(\d{2}\.\d{2}\.\d{4})\s*(\d{1,2}:\d{2}\s*PM|002:0 0PM)', 
+                            page_text, 
+                            re.DOTALL
+                        )
+                        
+                        if datetime_match:
+                            # Group 1: Date
+                            new_date_val = datetime_match.group(1).strip()
+                            if new_date_val != date_val:
                                 date_val = new_date_val
+                                log_message(f"Found new Date: {date_val}")
+                            
+                            # Group 2: Time
+                            new_time_val = datetime_match.group(2).strip()
+                            
+                            # --- FIX FOR MALFORMED TIME ---
+                            if "002:0 0PM" in new_time_val:
+                                new_time_val = "02:00 PM"
+                            # --- END FIX ---
+
+                            # Standardize format (e.g., "2:00PM" -> "02:00 PM")
+                            if " " not in new_time_val:
+                                new_time_val = new_time_val.replace(" ", "") # remove all spaces
+                                if len(new_time_val) == 7: # "2:00PM" -> "02:00 PM"
+                                    new_time_val = "0" + new_time_val[:4] + " " + new_time_val[4:]
+                                elif len(new_time_val) == 8: # "02:00PM" -> "02:00 PM"
+                                    new_time_val = new_time_val[:5] + " " + new_time_val[5:]
+                            
+                            if new_time_val != time_val:
                                 time_val = new_time_val
-                                log_message(f"Found new Date: {date_val}, Time: {time_val}")
+                                log_message(f"Found new Time: {time_val}")
+                        # --- *** END NEW DATE/TIME LOGIC *** ---
                         
                         # --- 3b. Extract Table Data ---
                         tables = page.extract_tables()
-                        
                         processed_rows_on_page = 0
                         
                         for table in tables:
                             for row in table:
                                 try:
-                                    if not row or not row[0]:
-                                        continue
-                                    
-                                    # A valid student row starts with a number (e.g., "1", "2"...)
-                                    if not row[0].strip().isdigit():
-                                        continue
+                                    if not row or not row[0]: continue
+                                    if not row[0].strip().isdigit(): continue
                                         
                                     reg_num = "Unknown"
                                     name = "Unknown"
                                     
-                                    # Find the register number and name in the row
                                     for idx, cell in enumerate(row):
-                                        if not cell:
-                                            continue
-                                        
+                                        if not cell: continue
                                         cell_text = cell.strip().replace('\n', ' ')
-                                        
-                                        # Search for the reg num pattern *inside* the cell
                                         reg_match = reg_num_regex.search(cell_text)
                                         
                                         if reg_match:
                                             reg_num = reg_match.group(1)
-                                            
-                                            # Try to find name in the *same cell*
-                                            # (e.g., "VPAYSBO023 SHAN MUHAMMED")
                                             name_fragment = cell_text.replace(reg_num, '').strip()
+                                            
                                             if name_fragment and not reg_num_regex.search(name_fragment) and not name_fragment.isdigit():
                                                 name = name_fragment
-                                                break # Found both
+                                                break 
                                             
-                                            # If not in same cell, check the *next* cells
-                                            # (Handles "Unknown" name problem)
                                             try:
-                                                # Check next cell
                                                 next_cell = row[idx+1]
                                                 if next_cell and next_cell.strip():
                                                     name = next_cell.strip().replace('\n', ' ')
-                                                    break # Found it
-                                                    
-                                                # Check next-next cell (in case of blank column)
+                                                    break 
+                                                
                                                 next_next_cell = row[idx+2]
                                                 if next_next_cell and next_next_cell.strip():
                                                     name = next_next_cell.strip().replace('\n', ' ')
-                                                    break # Found it
+                                                    break
                                             except IndexError:
-                                                pass # Reached end of row
+                                                pass 
                                     
-                                    # Add the row if we found a register number
                                     if reg_num != "Unknown":
                                         formatted_row = {
                                             'Date': date_val.strip(),
@@ -302,7 +315,6 @@
 
                         if processed_rows_on_page > 0:
                            log_message(f"Found {processed_rows_on_page} candidates on page {i + 1}.")
-                           # --- FIX: Give browser time to update the log ---
                            await asyncio.sleep(0)
 
                 # --- End of PDF processing logic ---
@@ -313,22 +325,49 @@
                     return
 
                 log_message(f"Processed {total_pages} pages. Found {len(all_exam_rows)} total candidates.")
-                
-                # --- FIX: Give browser time to update the log ---
                 await asyncio.sleep(0)
+
+                # --- 4. NEW: Sort by Date and Time ---
+                log_message("Sorting entries by Date and Time...")
+                all_exam_rows_sorted = sorted(all_exam_rows, key=get_sort_key)
+                await asyncio.sleep(0)
+                
+                # --- 5. Allocate Room Numbers (on the sorted list) ---
+                log_message("Allocating room numbers...")
+                
+                processed_rows_with_rooms = []
+                current_session_key = None
+                session_student_count = 0
+                students_per_room = 30
+
+                for row in all_exam_rows_sorted: # Use the sorted list
+                    session_key = (row['Date'], row['Time'])
+                    
+                    # Check if this is a new session (new Date or Time)
+                    if session_key != current_session_key:
+                        current_session_key = session_key
+                        session_student_count = 0 # Reset counter for new session
+                    
+                    session_student_count += 1
+                    
+                    # Calculate room number
+                    room_number = math.ceil(session_student_count / students_per_room)
+                    row['Room No'] = f"Room {room_number}"
+                    
+                    processed_rows_with_rooms.append(row)
+
                 log_message("Converting to DataFrame and creating CSV...")
 
-                # 4. Convert to Pandas DataFrame and create CSV string
-                df = pd.DataFrame(all_exam_rows)
-                # Reorder columns to match user's request
-                df = df[['Date', 'Time', 'Course', 'Register Number', 'Name']]
+                # 6. Convert to Pandas DataFrame and create CSV string
+                df = pd.DataFrame(processed_rows_with_rooms)
+                # Reorder columns to match user's request, adding Room No at the end
+                df = df[['Date', 'Time', 'Course', 'Register Number', 'Name', 'Room No']]
                 csv_data = df.to_csv(index=False, encoding='utf-8')
 
-                # 5. Create a downloadable link for the CSV
+                # 7. Create a downloadable link for the CSV
                 blob = Blob.new([csv_data], {type: "text/csv;charset=utf-8"})
                 url = URL.createObjectURL(blob)
                 
-                # Use the original filename to create the CSV filename
                 csv_filename = file_name.rsplit('.', 1)[0] + '.csv' if '.' in file_name else 'output.csv'
 
                 download_area.innerHTML = f"""
